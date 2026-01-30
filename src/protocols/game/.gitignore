@@ -1,0 +1,14 @@
+# Compiled binaries
+*.o
+*.lo
+*.la
+
+# Automake-generated files
+.deps/
+.libs/
+Makefile
+Makefile.in
+
+# Editor backup files
+*~
+*.swp

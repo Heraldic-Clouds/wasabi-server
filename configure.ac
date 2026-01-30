@@ -1381,6 +1381,70 @@ AM_CONDITIONAL([ENABLE_WEBSOCKETS],
 AC_SUBST(WEBSOCKETS_LIBS)
 
 #
+# X11 (for game streaming)
+#
+
+have_x11=disabled
+X11_CFLAGS=
+X11_LIBS=
+XEXT_LIBS=
+XTST_LIBS=
+AC_ARG_WITH([x11],
+            [AS_HELP_STRING([--with-x11],
+                            [support X11 screen capture for game streaming @<:@default=check@:>@])],
+            [],
+            [with_x11=check])
+
+if test "x$with_x11" != "xno"
+then
+    have_x11=yes
+    PKG_CHECK_MODULES([X11], [x11],, [have_x11=no])
+
+    if test "x${have_x11}" = "xyes"
+    then
+        # Check for XShm extension
+        AC_CHECK_LIB([Xext], [XShmCreateImage],
+                     [XEXT_LIBS="-lXext"],
+                     [have_x11=no])
+
+        # Check for XTest extension
+        AC_CHECK_LIB([Xtst], [XTestFakeKeyEvent],
+                     [XTST_LIBS="-lXtst"],
+                     [have_x11=no])
+    fi
+
+    if test "x${have_x11}" = "xno"
+    then
+        AC_MSG_WARN([
+  --------------------------------------------
+   Unable to find X11 development libraries.
+   Game streaming protocol will be disabled.
+  --------------------------------------------])
+    fi
+fi
+
+AC_SUBST(X11_CFLAGS)
+AC_SUBST(X11_LIBS)
+AC_SUBST(XEXT_LIBS)
+AC_SUBST(XTST_LIBS)
+
+#
+# Game streaming protocol
+#
+
+AC_ARG_ENABLE([game],
+              [AS_HELP_STRING([--disable-game],
+                              [do not build support for game streaming])],
+              [],
+              [enable_game=yes])
+
+AM_CONDITIONAL([ENABLE_GAME], [test "x${enable_game}"     = "xyes" \
+                                 -a "x${have_x11}"        = "xyes" \
+                                 -a "x${have_libavcodec}" = "xyes" \
+                                 -a "x${have_libavutil}"  = "xyes" \
+                                 -a "x${have_libswscale}" = "xyes"])
+
+#
 # Kubernetes
 #
 
@@ -1458,6 +1522,7 @@ AC_CONFIG_FILES([Makefile
                  src/guaclog/Makefile
                  src/guaclog/man/guaclog.1
                  src/pulse/Makefile
+                 src/protocols/game/Makefile
                  src/protocols/kubernetes/Makefile
                  src/protocols/kubernetes/tests/Makefile
                  src/protocols/rdp/Makefile
@@ -1471,6 +1536,7 @@ AC_OUTPUT
 # Protocol build status
 #
 
+AM_COND_IF([ENABLE_GAME],       [build_game=yes],       [build_game=no])
 AM_COND_IF([ENABLE_KUBERNETES], [build_kubernetes=yes], [build_kubernetes=no])
 AM_COND_IF([ENABLE_RDP],        [build_rdp=yes],        [build_rdp=no])
 AM_COND_IF([ENABLE_SSH],        [build_ssh=yes],        [build_ssh=no])
@@ -1530,9 +1596,11 @@ $PACKAGE_NAME version $PACKAGE_VERSION
      libwebsockets ....... ${have_libwebsockets}
      libwebp ............. ${have_webp}
      wsock32 ............. ${have_winsock}
+     X11 ................. ${have_x11}
 
    Protocol support:
 
+      Game .......... ${build_game}
       Kubernetes .... ${build_kubernetes}
       RDP ........... ${build_rdp}
       SSH ........... ${build_ssh}
