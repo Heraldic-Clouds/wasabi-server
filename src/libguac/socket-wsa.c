@@ -21,6 +21,7 @@
 #include "guacamole/error.h"
 #include "guacamole/socket.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -46,6 +47,13 @@ typedef struct guac_socket_wsa_data {
     int written;
 
     /**
+     * Whether a write has failed, thus invalidating further use of the
+     * socket. If a failed write has occurred, this value is set to the error
+     * code reported by WSAGetLastError() for that failure.
+     */
+    int failed_wsa_error;
+
+    /**
      * The main write buffer. Bytes written go here before being flushed
      * to the open socket.
      */
@@ -68,7 +76,9 @@ typedef struct guac_socket_wsa_data {
 /**
  * Writes the entire contents of the given buffer to the SOCKET handle
  * associated with the given socket, retrying as necessary until the whole
- * buffer is written, and aborting if an error occurs.
+ * buffer is written, and aborting if an error occurs. If an error occurs, errno
+ * and the failed_wsa_error member of guac_socket_wsa_data are set to the error
+ * code reported by WSAGetLastError().
  *
  * @param socket
  *     The guac_socket associated with the SOCKET handle to which the given
@@ -93,10 +103,13 @@ ssize_t guac_socket_wsa_write(guac_socket* socket,
     /* Write until completely written */
     while (count > 0) {
 
-        int retval = send(data->sock, buffer, count, 0);
+        int retval;
+        GUAC_RETRY_UNTIL(retval, send(data->sock, buffer, count, 0),
+                retval < 0 && WSAGetLastError() == WSAEINTR);
 
         /* Record errors in guac_error */
         if (retval < 0) {
+            data->failed_wsa_error = errno = WSAGetLastError();
             guac_error = GUAC_STATUS_SEE_ERRNO;
             guac_error_message = "Error writing data to socket";
             return retval;
@@ -134,7 +147,9 @@ static ssize_t guac_socket_wsa_read_handler(guac_socket* socket,
     guac_socket_wsa_data* data = (guac_socket_wsa_data*) socket->data;
 
     /* Read from socket */
-    int retval = recv(data->sock, buf, count, 0);
+    int retval;
+    GUAC_RETRY_UNTIL(retval, recv(data->sock, buf, count, 0),
+            retval < 0 && WSAGetLastError() == WSAEINTR);
 
     /* Record errors in guac_error */
     if (retval < 0) {
@@ -161,14 +176,29 @@ static ssize_t guac_socket_wsa_flush(guac_socket* socket) {
 
     guac_socket_wsa_data* data = (guac_socket_wsa_data*) socket->data;
 
+    /* Drop any further writes to failed socket (instruction stream is no longer
+     * valid) */
+    if (data->failed_wsa_error) {
+        WSASetLastError(data->failed_wsa_error);
+        errno = data->failed_wsa_error;
+        guac_error = GUAC_STATUS_SEE_ERRNO;
+        guac_error_message = "Error writing data to socket";
+        return 1;
+    }
+
     /* Flush remaining bytes in buffer */
     if (data->written > 0) {
 
         /* Write ALL bytes in buffer immediately */
-        if (guac_socket_wsa_write(socket, data->out_buf, data->written))
+        int flush_failed = guac_socket_wsa_write(socket, data->out_buf, data->written);
+
+        /* All outstanding content in the buffer is either fully written or no
+         * longer valid (failed/partial write) */
+        data->written = 0;
+
+        if (flush_failed)
             return 1;
 
-        data->written = 0;
     }
 
     return 0;
@@ -228,6 +258,15 @@ static ssize_t guac_socket_wsa_write_buffered(guac_socket* socket,
     size_t original_count = count;
     const char* current = buf;
     guac_socket_wsa_data* data = (guac_socket_wsa_data*) socket->data;
+
+    /* Refuse further writes/buffering if the stream is already broken */
+    if (data->failed_wsa_error) {
+        WSASetLastError(data->failed_wsa_error);
+        errno = data->failed_wsa_error;
+        guac_error = GUAC_STATUS_SEE_ERRNO;
+        guac_error_message = "Error writing data to socket";
+        return -1;
+    }
 
     /* Append to buffer, flush if necessary */
     while (count > 0) {
@@ -327,19 +366,26 @@ static int guac_socket_wsa_select_handler(guac_socket* socket,
     struct timeval timeout;
     int retval;
 
-    /* Initialize fd_set with single underlying socket handle */
-    FD_ZERO(&sockets);
-    FD_SET(data->sock, &sockets);
-
     /* No timeout if usec_timeout is negative */
-    if (usec_timeout < 0)
-        retval = select(0, &sockets, NULL, NULL, NULL);
+    if (usec_timeout < 0) {
+        do {
+            /* On retry, fd_set contents are undefined. */
+            FD_ZERO(&sockets);
+            FD_SET(data->sock, &sockets);
+            retval = select(0, &sockets, NULL, NULL, NULL);
+        } while (retval < 0 && WSAGetLastError() == WSAEINTR);
+    }
 
     /* Handle timeout if specified */
     else {
-        timeout.tv_sec  = usec_timeout / 1000000;
-        timeout.tv_usec = usec_timeout % 1000000;
-        retval = select(0, &sockets, NULL, NULL, &timeout);
+        do {
+            timeout.tv_sec  = usec_timeout / 1000000;
+            timeout.tv_usec = usec_timeout % 1000000;
+            /* On retry, fd_set contents are undefined. */
+            FD_ZERO(&sockets);
+            FD_SET(data->sock, &sockets);
+            retval = select(0, &sockets, NULL, NULL, &timeout);
+        } while (retval < 0 && WSAGetLastError() == WSAEINTR);
     }
 
     /* Properly set guac_error */
@@ -355,6 +401,18 @@ static int guac_socket_wsa_select_handler(guac_socket* socket,
 
     return retval;
 
+}
+
+/**
+ * Cancels all pending and future operations on the given socket by shutting
+ * down the underlying Windows socket in both directions.
+ *
+ * @param socket
+ *     The guac_socket whose operations should be canceled.
+ */
+static void guac_socket_wsa_shutdown_handler(guac_socket* socket) {
+    guac_socket_wsa_data* data = (guac_socket_wsa_data*) socket->data;
+    shutdown(data->sock, SD_BOTH);
 }
 
 /**
@@ -425,6 +483,7 @@ guac_socket* guac_socket_open_wsa(SOCKET sock) {
     /* Store socket as socket data */
     data->sock = sock;
     data->written = 0;
+    data->failed_wsa_error = 0;
     socket->data = data;
 
     pthread_mutexattr_init(&lock_attributes);
@@ -435,13 +494,14 @@ guac_socket* guac_socket_open_wsa(SOCKET sock) {
     pthread_mutex_init(&(data->buffer_lock), &lock_attributes);
     
     /* Set read/write handlers */
-    socket->read_handler   = guac_socket_wsa_read_handler;
-    socket->write_handler  = guac_socket_wsa_write_handler;
-    socket->select_handler = guac_socket_wsa_select_handler;
-    socket->lock_handler   = guac_socket_wsa_lock_handler;
-    socket->unlock_handler = guac_socket_wsa_unlock_handler;
-    socket->flush_handler  = guac_socket_wsa_flush_handler;
-    socket->free_handler   = guac_socket_wsa_free_handler;
+    socket->read_handler     = guac_socket_wsa_read_handler;
+    socket->write_handler    = guac_socket_wsa_write_handler;
+    socket->select_handler   = guac_socket_wsa_select_handler;
+    socket->lock_handler     = guac_socket_wsa_lock_handler;
+    socket->unlock_handler   = guac_socket_wsa_unlock_handler;
+    socket->flush_handler    = guac_socket_wsa_flush_handler;
+    socket->free_handler     = guac_socket_wsa_free_handler;
+    socket->shutdown_handler = guac_socket_wsa_shutdown_handler;
 
     return socket;
 

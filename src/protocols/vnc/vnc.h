@@ -41,6 +41,7 @@
 #endif
 
 #include <guacamole/recording.h>
+#include <guacamole/thread.h>
 
 #include <pthread.h>
 
@@ -58,7 +59,7 @@ typedef struct guac_vnc_client {
     /**
      * The VNC client thread.
      */
-    pthread_t client_thread;
+    guac_thread client_thread;
 
 #ifdef ENABLE_VNC_TLS_LOCKING
     /**
@@ -94,6 +95,18 @@ typedef struct guac_vnc_client {
      * by the VNC server.
      */
     int copy_rect_used;
+
+    /**
+     * Whether the first FinishedFrameBufferUpdate callback has been logged.
+     */
+    int finished_frame_logged;
+
+    /**
+     * Whether the initial lock key state of the VNC session has been received
+     * and synchronized with the all-released state that connecting Guacamole
+     * clients assume.
+     */
+    int lock_state_synced;
 
     /**
      * Client settings, parsed from args.
@@ -212,4 +225,3 @@ void* guac_vnc_client_thread(void* data);
 extern char* GUAC_VNC_CLIENT_KEY;
 
 #endif
-

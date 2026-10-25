@@ -24,6 +24,8 @@
 #
 
 AUTOMAKE_OPTIONS = foreign 
+
+AM_CPPFLAGS = -include config.h
 ACLOCAL_AMFLAGS = -I m4
 
 lib_LTLIBRARIES = libguac.la
@@ -89,6 +91,9 @@ libguacinc_HEADERS =                  \
     guacamole/stream-types.h          \
     guacamole/string.h                \
     guacamole/tcp.h                   \
+    guacamole/thread.h                \
+    guacamole/thread-fntypes.h        \
+    guacamole/thread-types.h          \
     guacamole/timestamp.h             \
     guacamole/timestamp-types.h       \
     guacamole/unicode.h               \
@@ -129,6 +134,7 @@ libguac_la_SOURCES =          \
     argv.c                    \
     audio.c                   \
     client.c                  \
+    client-watchdog.c         \
     display.c                 \
     display-builtin-cursors.c \
     display-cursor.c          \
@@ -166,6 +172,7 @@ libguac_la_SOURCES =          \
     socket-tee.c              \
     string.c                  \
     tcp.c                     \
+    thread.c                  \
     timestamp.c               \
     unicode.c                 \
     user.c                    \
@@ -209,4 +216,3 @@ libguac_la_LDFLAGS =     \
     @VORBIS_LIBS@        \
     @WEBP_LIBS@          \
     @WINSOCK_LIBS@
-

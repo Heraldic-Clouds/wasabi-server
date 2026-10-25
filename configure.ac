@@ -41,7 +41,20 @@ AC_PROG_LIBTOOL
 PKG_PROG_PKG_CONFIG()
 
 # Headers
-AC_CHECK_HEADERS([fcntl.h stdlib.h string.h sys/socket.h time.h sys/time.h syslog.h unistd.h cairo/cairo.h pngstruct.h])
+AC_CHECK_HEADERS(m4_normalize([
+    cairo/cairo.h
+    fcntl.h
+    pngstruct.h
+    stdlib.h
+    string.h
+    syslog.h
+    sys/prctl.h
+    sys/procctl.h
+    sys/socket.h
+    sys/time.h
+    time.h
+    unistd.h
+]))
 
 # Source characteristics
 AC_DEFINE([_GNU_SOURCE],   [1], [Uses GNU-specific APIs (if available)])
@@ -154,7 +167,62 @@ AC_SUBST(UUID_LIBS)
 AC_SUBST(CUNIT_LIBS)
 
 # Library functions
-AC_CHECK_FUNCS([clock_gettime gettimeofday memmove memset select strdup nanosleep prctl])
+AC_CHECK_FUNCS(m4_normalize([
+    accept4
+    clock_gettime
+    close_range
+    gettimeofday
+    memmove
+    memset
+    nanosleep
+    pipe2
+    prctl
+    select
+    strdup
+]))
+
+#
+# pthread_setname_np() variants
+#
+
+have_pthread_setname_np=no
+AC_MSG_CHECKING([whether a variant of pthread_setname_np() is available])
+
+# Three-argument variant accepting the thread, format string, and a single
+# argument for that format string (NetBSD-specific)
+if test "x$have_pthread_setname_np" = "xno"
+then
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+        [[#include <pthread.h>]],
+        [[pthread_setname_np(pthread_self(), "%s", "test");]])],
+        [have_pthread_setname_np=three-argument
+        AC_DEFINE([HAVE_PTHREAD_SETNAME_NP_THREAD_FORMAT],,
+                  [Whether pthread_setname_np() accepts the thread, format string, and name])])
+fi
+
+# Two-argument variant accepting the thread and name (GNU libc, FreeBSD, MUSL)
+if test "x$have_pthread_setname_np" = "xno"
+then
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+        [[#include <pthread.h>]],
+        [[pthread_setname_np(pthread_self(), "test");]])],
+        [have_pthread_setname_np=two-argument
+        AC_DEFINE([HAVE_PTHREAD_SETNAME_NP_THREAD_NAME],,
+                  [Whether pthread_setname_np() accepts the thread and name])])
+fi
+
+# Single-argument variant accepting only the name (MacOS-specific)
+if test "x$have_pthread_setname_np" = "xno"
+then
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([
+        [#include <pthread.h>]],
+        [[pthread_setname_np("test");]])],
+        [have_pthread_setname_np=single-argument
+        AC_DEFINE([HAVE_PTHREAD_SETNAME_NP_NAME],,
+                  [Whether pthread_setname_np() accepts only the thread name])])
+fi
+
+AC_MSG_RESULT([$have_pthread_setname_np])
 
 AC_CHECK_DECL([png_get_io_ptr],
     [AC_DEFINE([HAVE_PNG_GET_IO_PTR],,
@@ -725,6 +793,30 @@ then
 fi
 
 #
+# libVNCServer support for the Extended Clipboard pseudo-encoding, which
+# allows clipboard text to be exchanged as UTF-8 via SendClientCutTextUTF8()
+# and the GotXCutTextUTF8 callback. Both were added in libvncserver 0.9.15.
+# If support is missing, Guacamole falls back to the classic VNC clipboard
+# with iconv-based encoding conversion.
+#
+
+if test "x${have_libvncserver}" = "xyes"
+then
+
+    have_vnc_extended_clipboard=yes
+    AC_CHECK_MEMBERS([rfbClient.GotXCutTextUTF8],
+                     [], [have_vnc_extended_clipboard=no],
+                     [[#include <rfb/rfbclient.h>]])
+
+    if test "x${have_vnc_extended_clipboard}" = "xyes"
+    then
+        AC_DEFINE([LIBVNC_CLIENT_HAS_EXTENDED_CLIPBOARD],,
+                  [Whether rfbClient supports the Extended Clipboard pseudo-encoding (UTF-8).])
+    fi
+
+fi
+
+#
 # FreeRDP (libfreerdpX, libfreerdp-clientX, and libwinprX)
 #
 
@@ -812,8 +904,9 @@ then
     ],
     [AC_MSG_RESULT([no])],
     [AC_MSG_RESULT([yes])]
-    [AC_MSG_ERROR([
+    [AC_MSG_WARN([
   --------------------------------------------
+   !!! WARNING !!!
    You are building against a development version of FreeRDP. Non-release
    versions of FreeRDP may have differences in behavior that are impossible to
    check for at build time. This may result in memory leaks or other strange
@@ -821,8 +914,8 @@ then
 
    *** PLEASE USE A RELEASED VERSION OF FREERDP IF POSSIBLE ***
 
-   If you are ABSOLUTELY CERTAIN that building against this version of FreeRDP
-   is OK, rerun configure with the --enable-allow-freerdp-snapshots
+   You can suppress this warning by re-running the configure script with the
+   --enable-allow-freerdp-snapshots flag.
   --------------------------------------------])])
 
 fi
@@ -986,6 +1079,22 @@ fi
 if test "x${have_freerdp}" = "xyes"
 then
     AC_CHECK_MEMBERS([freerdp.VerifyCertificateEx],,,
+                      [[#include <freerdp/freerdp.h>]])
+fi
+
+# Check for either AuthenticateEx or Authenticate callbacks.
+if test "x${have_freerdp}" = "xyes"
+then
+    AC_CHECK_MEMBERS([freerdp.AuthenticateEx],,
+                     [AC_CHECK_MEMBERS([freerdp.Authenticate],,
+                                       [AC_MSG_WARN([
+  ----------------------------------------------------
+   This version of FreeRDP appears to lack support
+   for both Authenticate and AuthenticateEx functions.
+   RDP connections may fail if credentials are not
+   provided with the connection.
+  ----------------------------------------------------])],
+                                       [[#include <freerdp/freerdp.h>]])],
                       [[#include <freerdp/freerdp.h>]])
 fi
 

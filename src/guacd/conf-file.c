@@ -17,13 +17,12 @@
  * under the License.
  */
 
-#include "config.h"
-
 #include "conf.h"
 #include "conf-file.h"
 #include "conf-parse.h"
 
 #include <guacamole/client.h>
+#include <guacamole/error.h>
 #include <guacamole/mem.h>
 #include <guacamole/string.h>
 
@@ -134,7 +133,11 @@ int guacd_conf_parse_file(guacd_config* conf, int fd) {
     int parsed = 0;
 
     /* Attempt to fill remaining space in buffer */
-    while ((chars_read = read(fd, buffer + length, sizeof(buffer) -  length)) > 0) {
+    while (1) {
+        GUAC_RETRY_EINTR(chars_read, read(fd, buffer + length, sizeof(buffer) - length));
+
+        if (chars_read <= 0)
+            break;
 
         length += chars_read;
 
@@ -191,23 +194,28 @@ guacd_config* guacd_conf_load(void) {
 #endif
 
     /* Read configuration from file */
-    int fd = open(GUACD_CONF_FILE, O_RDONLY);
-    if (fd > 0) {
+    int fd = open(GUACD_CONF_FILE, O_RDONLY | O_CLOEXEC);
 
-        int retval = guacd_conf_parse_file(conf, fd);
-        close(fd);
-
-        if (retval != 0) {
-            fprintf(stderr, "Unable to parse \"" GUACD_CONF_FILE "\".\n");
+    /* Notify of errors preventing reading */
+    if (fd < 0) {
+        if (errno != ENOENT) {
+            fprintf(stderr, "Unable to open \"" GUACD_CONF_FILE "\": %s\n", strerror(errno));
+            guac_mem_free(conf->bind_host);
+            guac_mem_free(conf->bind_port);
             guac_mem_free(conf);
             return NULL;
         }
-
+        /* Return default configuration if the guacd configuration file doesn't exist */
+        return conf;
     }
 
-    /* Notify of errors preventing reading */
-    else if (errno != ENOENT) {
-        fprintf(stderr, "Unable to open \"" GUACD_CONF_FILE "\": %s\n", strerror(errno));
+    int retval = guacd_conf_parse_file(conf, fd);
+    close(fd);
+
+    if (retval != 0) {
+        fprintf(stderr, "Unable to parse \"" GUACD_CONF_FILE "\".\n");
+        guac_mem_free(conf->bind_host);
+        guac_mem_free(conf->bind_port);
         guac_mem_free(conf);
         return NULL;
     }

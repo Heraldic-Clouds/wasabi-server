@@ -17,8 +17,6 @@
  * under the License.
  */
 
-#include "config.h"
-
 #include "guacamole/mem.h"
 
 #include <stddef.h>
@@ -59,8 +57,8 @@ int guac_itoa(char* restrict dest, int integer) {
 
 }
 
-int guac_itoa_safe(char* restrict dest, size_t dest_size, int integer)
-{
+int guac_itoa_safe(char* restrict dest, size_t dest_size, int integer) {
+
     int str_size = snprintf(dest, dest_size, "%d", integer);
 
     if (str_size < 0)
@@ -72,6 +70,10 @@ int guac_itoa_safe(char* restrict dest, size_t dest_size, int integer)
 
     /* Return the number of characters written (excluding the terminator). */
     return str_size;
+}
+
+int guac_is_nonempty(const char* str) {
+    return str != NULL && *str != '\0';
 }
 
 size_t guac_strlcpy(char* restrict dest, const char* restrict src, size_t n) {
@@ -118,25 +120,28 @@ char* guac_strnstr(const char *haystack, const char *needle, size_t len) {
 #ifdef HAVE_STRNSTR
     return strnstr(haystack, needle, len);
 #else
-    char* chr;
-    size_t nlen = strlen(needle), off = 0;
+    const char* chr;
+    size_t nlen = strlen(needle);
 
     /* Follow documented API: return haystack if needle is the empty string. */
     if (nlen == 0)
-        return (char *)haystack;
+        return (char*) haystack;
 
     /* Use memchr to find candidates. It might be optimized in asm. */
-    while (off < len && NULL != (chr = memchr(haystack + off, needle[0], len - off))) {
+    for (size_t off = 0; off < len
+            && NULL != (chr = memchr(haystack + off, needle[0], len - off)); off++) {
+
         /* chr is guaranteed to be in bounds of and >= haystack. */
         off = chr - haystack;
+
         /* If needle would go beyond provided len, it doesn't exist in haystack. */
         if (off + nlen > len)
             return NULL;
+
         /* Now that we know we have at least nlen bytes, compare them. */
         if (!memcmp(chr, needle, nlen))
-            return chr;
-        /* Make sure we make progress. */
-        off += 1;
+            return (char*) chr;
+
     }
 
     /* memchr ran out of candidates, needle wasn't found. */

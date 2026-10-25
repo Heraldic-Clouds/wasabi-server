@@ -24,6 +24,8 @@
 #
 
 AUTOMAKE_OPTIONS = foreign 
+
+AM_CPPFLAGS = -include config.h
 ACLOCAL_AMFLAGS = -I m4
 
 #
@@ -71,6 +73,7 @@ test_libguac_SOURCES =               \
     string/strlcpy.c                 \
     string/strljoin.c                \
     string/strnstr.c                 \
+    thread/thread.c                  \
     unicode/charsize.c               \
     unicode/read.c                   \
     unicode/strlen.c                 \

@@ -17,17 +17,17 @@
  * under the License.
  */
 
-#include "config.h"
-
 #include "argv.h"
 #include "telnet.h"
 #include "terminal/terminal.h"
 
 #include <guacamole/client.h>
+#include <guacamole/error.h>
 #include <guacamole/mem.h>
 #include <guacamole/protocol.h>
 #include <guacamole/recording.h>
 #include <guacamole/tcp.h>
+#include <guacamole/thread.h>
 #include <guacamole/timestamp.h>
 #include <guacamole/wol-constants.h>
 #include <guacamole/wol.h>
@@ -75,7 +75,8 @@ static int __guac_telnet_write_all(int fd, const char* buffer, int size) {
     while (remaining > 0) {
 
         /* Attempt to write data */
-        int ret_val = write(fd, buffer, remaining);
+        int ret_val;
+        GUAC_RETRY_EINTR(ret_val, write(fd, buffer, remaining));
         if (ret_val <= 0)
             return -1;
 
@@ -478,8 +479,12 @@ static int __guac_telnet_wait(int socket_fd) {
         .revents = 0,
     }};
 
+    int wait_result;
+
     /* Wait for one second */
-    return poll(fds, 1, 1000);
+    GUAC_RETRY_EINTR(wait_result, poll(fds, 1, 1000));
+
+    return wait_result;
 
 }
 
@@ -489,9 +494,18 @@ void* guac_telnet_client_thread(void* data) {
     guac_telnet_client* telnet_client = (guac_telnet_client*) client->data;
     guac_telnet_settings* settings = telnet_client->settings;
 
-    pthread_t input_thread;
+    guac_thread input_thread;
     char buffer[8192];
     int wait_result;
+
+    const char* telnet_port = settings->port != NULL
+            ? settings->port : GUAC_TELNET_DEFAULT_PORT;
+
+    guac_client_set_info(client, &(guac_client_info) {
+        .username = settings->username,
+        .hostname = settings->hostname,
+        .port = telnet_port
+    });
 
     /* If Wake-on-LAN is enabled, attempt to wake. */
     if (settings->wol_send_packet) {
@@ -502,7 +516,8 @@ void* guac_telnet_client_thread(void* data) {
          */
         if (settings->wol_wait_time > 0) {
             guac_client_log(client, GUAC_LOG_DEBUG, "Sending Wake-on-LAN packet, "
-                "and pausing for %d seconds.", settings->wol_wait_time);
+                "and retrying connection check %d times every %d seconds.",
+                GUAC_WOL_DEFAULT_CONNECT_RETRIES, settings->wol_wait_time);
 
             /* Send the Wake-on-LAN request and wait until the server is responsive. */
             if (guac_wol_wake_and_wait(settings->wol_mac_addr,
@@ -513,17 +528,21 @@ void* guac_telnet_client_thread(void* data) {
                     settings->hostname,
                     settings->port,
                     settings->timeout)) {
-                guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet or connect to remote server.");
+                guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet, or connect to remote server.");
                 return NULL;
             }
         }
 
-        /* Just send the packet and continue the connection, or return if failed. */
-        else if (guac_wol_wake(settings->wol_mac_addr,
+        /* Just send the packet, or return NULL if failed. */
+        else {
+            guac_client_log(client, GUAC_LOG_DEBUG, "Sending Wake-on-LAN packet.");
+
+            if (guac_wol_wake(settings->wol_mac_addr,
                     settings->wol_broadcast_addr,
                     settings->wol_udp_port)) {
-            guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet.");
-            return NULL;
+                guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet.");
+                return NULL;
+            }
         }
     }
 
@@ -537,7 +556,8 @@ void* guac_telnet_client_thread(void* data) {
                 !settings->recording_exclude_mouse,
                 0, /* Touch events not supported */
                 settings->recording_include_keys,
-                settings->recording_write_existing);
+                settings->recording_write_existing,
+                settings->recording_include_clipboard);
     }
 
     /* Create terminal options with required parameters */
@@ -553,6 +573,7 @@ void* guac_telnet_client_thread(void* data) {
     options->color_scheme = settings->color_scheme;
     options->backspace = settings->backspace;
     options->func_keys_and_keypad = settings->func_keys_and_keypad;
+    options->linux_console_keys = (strcmp(settings->terminal_type, "linux") == 0);
 
     /* Create terminal */
     telnet_client->term = guac_terminal_create(client, options);
@@ -597,7 +618,7 @@ void* guac_telnet_client_thread(void* data) {
         guac_terminal_start(telnet_client->term);
 
     /* Start input thread */
-    if (pthread_create(&(input_thread), NULL, __guac_telnet_input_thread, (void*) client)) {
+    if (guac_thread_create(&input_thread, __guac_telnet_input_thread, (void*) client, "telnet-stdin")) {
         guac_client_abort(client, GUAC_PROTOCOL_STATUS_SERVER_ERROR, "Unable to start input thread");
         return NULL;
     }
@@ -609,7 +630,8 @@ void* guac_telnet_client_thread(void* data) {
         if (wait_result == 0)
             continue;
 
-        int bytes_read = read(telnet_client->socket_fd, buffer, sizeof(buffer));
+        int bytes_read;
+        GUAC_RETRY_EINTR(bytes_read, read(telnet_client->socket_fd, buffer, sizeof(buffer)));
         if (bytes_read <= 0)
             break;
 
@@ -619,10 +641,9 @@ void* guac_telnet_client_thread(void* data) {
 
     /* Kill client and Wait for input thread to die */
     guac_client_stop(client);
-    pthread_join(input_thread, NULL);
+    guac_thread_join(&input_thread, NULL);
 
     guac_client_log(client, GUAC_LOG_INFO, "Telnet connection ended.");
     return NULL;
 
 }
-

@@ -17,8 +17,6 @@
  * under the License.
  */
 
-#include "config.h"
-
 #include "argv.h"
 #include "common-ssh/sftp.h"
 #include "common-ssh/ssh.h"
@@ -35,9 +33,11 @@
 #include <libssh2.h>
 #include <libssh2_sftp.h>
 #include <guacamole/client.h>
+#include <guacamole/error.h>
 #include <guacamole/mem.h>
 #include <guacamole/recording.h>
 #include <guacamole/socket.h>
+#include <guacamole/thread.h>
 #include <guacamole/timestamp.h>
 #include <guacamole/wol-constants.h>
 #include <guacamole/wol.h>
@@ -231,7 +231,7 @@ void* ssh_client_thread(void* data) {
 
     char buffer[8192];
 
-    pthread_t input_thread;
+    guac_thread input_thread;
 
     /* If Wake-on-LAN is enabled, attempt to wake. */
     if (settings->wol_send_packet) {
@@ -242,7 +242,8 @@ void* ssh_client_thread(void* data) {
          */
         if (settings->wol_wait_time > 0) {
             guac_client_log(client, GUAC_LOG_DEBUG, "Sending Wake-on-LAN packet, "
-                "and pausing for %d seconds.", settings->wol_wait_time);
+                "and retrying connection check %d times every %d seconds.",
+                GUAC_WOL_DEFAULT_CONNECT_RETRIES, settings->wol_wait_time);
 
             /* Send the Wake-on-LAN request and wait until the server is responsive. */
             if (guac_wol_wake_and_wait(settings->wol_mac_addr,
@@ -253,17 +254,21 @@ void* ssh_client_thread(void* data) {
                     settings->hostname,
                     settings->port,
                     settings->timeout)) {
-                guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet or connect to remote server.");
+                guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet, or connect to remote server.");
                 return NULL;
             }
         }
 
-        /* Just send the packet and continue the connection, or return if failed. */
-        else if (guac_wol_wake(settings->wol_mac_addr,
-                     settings->wol_broadcast_addr,
-                     settings->wol_udp_port)) {
-            guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet.");
-            return NULL;
+        /* Just send the packet, or return NULL if failed. */
+        else {
+            guac_client_log(client, GUAC_LOG_DEBUG, "Sending Wake-on-LAN packet.");
+
+            if (guac_wol_wake(settings->wol_mac_addr,
+                    settings->wol_broadcast_addr,
+                    settings->wol_udp_port)) {
+                guac_client_log(client, GUAC_LOG_ERROR, "Failed to send WOL packet.");
+                return NULL;
+            }
         }
     }
 
@@ -286,7 +291,8 @@ void* ssh_client_thread(void* data) {
                 !settings->recording_exclude_mouse,
                 0, /* Touch events not supported */
                 settings->recording_include_keys,
-                settings->recording_write_existing);
+                settings->recording_write_existing,
+                settings->recording_include_clipboard);
     }
 
     /* Create terminal options with required parameters */
@@ -302,6 +308,7 @@ void* ssh_client_thread(void* data) {
     options->color_scheme = settings->color_scheme;
     options->backspace = settings->backspace;
     options->func_keys_and_keypad = settings->func_keys_and_keypad;
+    options->linux_console_keys = (strcmp(settings->terminal_type, "linux") == 0);
 
     /* Create terminal */
     ssh_client->term = guac_terminal_create(client, options);
@@ -337,6 +344,15 @@ void* ssh_client_thread(void* data) {
 
     /* Ensure connection is kept alive during lengthy connects */
     guac_socket_require_keep_alive(client->socket);
+
+    const char* ssh_port = settings->port != NULL
+            ? settings->port : GUAC_SSH_DEFAULT_PORT;
+
+    guac_client_set_info(client, &(guac_client_info) {
+        .username = settings->username,
+        .hostname = settings->hostname,
+        .port = ssh_port
+    });
 
     /* Open SSH session */
     ssh_client->session = guac_common_ssh_create_session(client,
@@ -471,7 +487,7 @@ void* ssh_client_thread(void* data) {
     guac_terminal_start(ssh_client->term);
 
     /* Start input thread */
-    if (pthread_create(&(input_thread), NULL, ssh_input_thread, (void*) client)) {
+    if (guac_thread_create(&input_thread, ssh_input_thread, (void*) client, "ssh-stdin")) {
         guac_client_abort(client, GUAC_PROTOCOL_STATUS_SERVER_ERROR, "Unable to start input thread");
         return NULL;
     }
@@ -555,8 +571,11 @@ void* ssh_client_thread(void* data) {
                 .revents = 0,
             }};
 
+            int wait_result;
             /* Wait up to computed timeout */
-            if (poll(fds, 1, timeout) < 0)
+            GUAC_RETRY_EINTR(wait_result, poll(fds, 1, timeout));
+
+            if (wait_result < 0)
                 break;
 
         }
@@ -565,7 +584,7 @@ void* ssh_client_thread(void* data) {
 
     /* Kill client and Wait for input thread to die */
     guac_client_stop(client);
-    pthread_join(input_thread, NULL);
+    guac_thread_join(&input_thread, NULL);
 
     pthread_mutex_destroy(&ssh_client->term_channel_lock);
 
@@ -573,4 +592,3 @@ void* ssh_client_thread(void* data) {
     return NULL;
 
 }
-

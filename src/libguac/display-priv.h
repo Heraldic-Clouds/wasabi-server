@@ -26,6 +26,7 @@
 #include "guacamole/fifo.h"
 #include "guacamole/rect.h"
 #include "guacamole/socket.h"
+#include "guacamole/thread.h"
 
 #include <pthread.h>
 
@@ -287,9 +288,9 @@ struct guac_display_render_thread {
     guac_display* display;
 
     /**
-     * The actual underlying POSIX thread.
+     * The actual underlying thread.
      */
-    pthread_t thread;
+    guac_thread thread;
 
     /**
      * Flag representing render state. This flag is used to store whether the
@@ -516,6 +517,12 @@ struct guac_display_layer {
      */
     int opaque;
 
+    /**
+     * Lock used to ensure sequences of Guacamole protocol path instructions
+     * for this layer are not interleaved when sent from concurrent threads.
+     */
+    pthread_mutex_t path_lock;
+
     /* ---------------- LAYER PREVIOUS FRAME STATE ---------------- */
 
     /**
@@ -603,6 +610,17 @@ struct guac_display_layer {
      */
     size_t pending_frame_cells_height;
 
+    /**
+     * The next layer within the list of layers that have been removed from
+     * the pending frame and are awaiting destruction, or NULL if this is the
+     * last such layer. This value is meaningful only for layers that have been
+     * removed from the pending frame layer list.
+     *
+     * IMPORTANT: The display-level pending_frame.lock MUST be acquired before
+     * modifying or reading this member.
+     */
+    guac_display_layer* next_removed;
+
 };
 
 typedef struct guac_display_state {
@@ -640,12 +658,13 @@ typedef struct guac_display_state {
      *  - NEXT: layer->pending_frame.next
      *  - PREV: layer->pending_frame.prev
      *
-     * Existing layers are deleted only at the time a frame is flushed when a
-     * layer in the last frame layer list is found to no longer exist in the
-     * pending frame layer list. The same goes for the addition of new layers:
-     * they are added only during flush when a layer that was not present in
-     * the last frame layer list is found to be present in the pending frame
-     * layer list.
+     * Layers are added to and removed from only the pending frame layer list.
+     * The last frame layer list is rebuilt from the pending frame layer list
+     * each time a frame is flushed, so an added or removed layer takes effect
+     * on the last frame only at that point. A removed layer is freed only
+     * after a flush has dropped it from the last frame layer list (see the
+     * pending_frame_removed_layers member of guac_display and
+     * guac_display_free_removed_layers()).
      */
     guac_display_layer* layers;
 
@@ -732,6 +751,16 @@ struct guac_display {
      */
     int pending_frame_dirty_excluding_mouse;
 
+    /**
+     * The head of the list of layers that have been removed from the pending
+     * frame but cannot be freed until the frame is flushed. This list is
+     * iterated via the next_removed member of guac_display_layer.
+     *
+     * IMPORTANT: The display-level pending_frame.lock MUST be acquired before
+     * modifying or reading this member.
+     */
+    guac_display_layer* pending_frame_removed_layers;
+
     /* ---------------- WELL-KNOWN LAYERS / BUFFERS ---------------- */
 
     /**
@@ -757,7 +786,7 @@ struct guac_display {
      * Pool of worker threads that automatically pull from the ops FIFO,
      * sending corresponding Guacamole instructions to all connected clients.
      */
-    pthread_t* worker_threads;
+    guac_thread* worker_threads;
 
     /**
      * FIFO of all graphical operations required to transform the remote
@@ -824,13 +853,32 @@ struct guac_display {
 guac_display_layer* guac_display_add_layer(guac_display* display, guac_layer* layer, int opaque);
 
 /**
- * Removes the given layer from all linked lists containing that layer and
- * frees all associated memory.
+ * Removes the given layer from the pending frame layer list. The layer is not
+ * immediately freed, but is instead scheduled to be freed via the
+ * pending_frame_removed_layers list of the display. It will finally be freed
+ * and removed from the last frame list when the frame is flushed.
  *
  * @param display_layer
  *     The layer to remove.
  */
 void guac_display_remove_layer(guac_display_layer* display_layer);
+
+/**
+ * Frees the list of layers that are awaiting removal from a previous call to
+ * guac_display_remove_layer(). This function is safe to call only after all
+ * removed layers are not part of any outstanding frame, including any
+ * operations that may not yet have been flushed by the worker threads.
+ *
+ * @param display
+ *     The display that the layers were removed from.
+ *
+ * @param removed_layers
+ *     The head of the list of removed layers to free, linked via the
+ *     next_removed member of guac_display_layer, or NULL if there are no such
+ *     layers.
+ */
+void guac_display_free_removed_layers(guac_display* display,
+        guac_display_layer* removed_layers);
 
 /**
  * Resizes the given layer to the given dimensions, including any underlying

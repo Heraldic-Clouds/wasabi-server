@@ -30,6 +30,7 @@
 #include "selection-point.h"
 
 #include <guacamole/flag.h>
+#include <guacamole/thread.h>
 
 /**
  * The bitwise flag set on the modified flag of guac_terminal when the terminal
@@ -73,7 +74,7 @@ struct guac_terminal {
     /**
      * The terminal render thread.
      */
-    pthread_t thread;
+    guac_thread thread;
 
     /**
      * Called whenever the necessary terminal codes are sent to change
@@ -447,6 +448,12 @@ struct guac_terminal {
      * Whether the shift key is currently being held down.
      */
     int mod_shift;
+
+    /**
+     * Whether to use Linux terminal type compatibility mode for key encoding.
+     * See guac_terminal_options.linux_console_keys.
+     */
+    bool linux_console_keys;
 
     /**
      * The current mouse button state.

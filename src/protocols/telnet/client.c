@@ -17,7 +17,6 @@
  * under the License.
  */
 
-#include "config.h"
 #include "argv.h"
 #include "client.h"
 #include "settings.h"
@@ -36,6 +35,7 @@
 #include <guacamole/mem.h>
 #include <guacamole/recording.h>
 #include <guacamole/socket.h>
+#include <guacamole/thread.h>
 
 /**
  * A pending join handler implementation that will synchronize the connection
@@ -118,7 +118,7 @@ int guac_telnet_client_free_handler(guac_client* client) {
 
     /* Wait for and free telnet session, if connected */
     if (telnet_client->telnet != NULL) {
-        pthread_join(telnet_client->client_thread, NULL);
+        guac_thread_join(&telnet_client->client_thread, NULL);
         telnet_free(telnet_client->telnet);
     }
 

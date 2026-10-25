@@ -17,12 +17,12 @@
  * under the License.
  */
 
-#include "config.h"
 #include "display-priv.h"
 #include "guacamole/client.h"
 #include "guacamole/display.h"
 #include "guacamole/flag.h"
 #include "guacamole/mem.h"
+#include "guacamole/thread.h"
 #include "guacamole/timestamp.h"
 
 /**
@@ -48,8 +48,10 @@
 /**
  * The start routine for the display render thread, consisting of a single
  * render loop. The render loop will proceed until signalled to stop,
- * determining frame boundaries via a combination of heuristics and explicit
- * marking (if available).
+ * determining frame boundaries via explicit marking when available (e.g. VNC's
+ * FinishedFrameBufferUpdate, RDP's frame markers), falling back to heuristics
+ * based on the timing of display modifications when the protocol handler
+ * provides no explicit frame boundaries.
  *
  * @param data
  *     The guac_display_render_thread structure containing the render thread
@@ -189,7 +191,8 @@ guac_display_render_thread* guac_display_render_thread_create(guac_display* disp
 
     /* Start render thread (this will immediately begin blocking until frame
      * modification or readiness is signalled) */
-    pthread_create(&render_thread->thread, NULL, guac_display_render_loop, render_thread);
+    guac_thread_create(&render_thread->thread, guac_display_render_loop,
+            render_thread, "disp-render");
 
     return render_thread;
 
@@ -221,7 +224,7 @@ void guac_display_render_thread_destroy(guac_display_render_thread* render_threa
 
     /* Clean up render thread after signalling it to stop */
     guac_flag_set(&render_thread->state, GUAC_DISPLAY_RENDER_THREAD_STATE_STOPPING);
-    pthread_join(render_thread->thread, NULL);
+    guac_thread_join(&render_thread->thread, NULL);
 
     /* Free remaining resources */
     guac_flag_destroy(&render_thread->state);

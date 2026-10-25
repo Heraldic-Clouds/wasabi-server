@@ -42,7 +42,7 @@
 guac_recording* guac_recording_create(guac_client* client,
         const char* path, const char* name, int create_path,
         int include_output, int include_mouse, int include_touch,
-        int include_keys, int allow_write_existing) {
+        int include_keys, int allow_write_existing, int include_clipboard) {
 
     char filename[GUAC_COMMON_RECORDING_MAX_NAME_LENGTH];
 
@@ -69,18 +69,53 @@ guac_recording* guac_recording_create(guac_client* client,
         return NULL;
     }
 
+    /* Wrap recording file in socket */
+    guac_socket* socket = guac_socket_open(fd);
+    if (socket == NULL) {
+        guac_client_log(client, GUAC_LOG_ERROR, "Creation of recording "
+                "failed: %s: %s", guac_error_message,
+                guac_status_string(guac_error));
+        close(fd);
+        return NULL;
+    }
+
     /* Create recording structure with reference to underlying socket */
     guac_recording* recording = guac_mem_alloc(sizeof(guac_recording));
-    recording->socket = guac_socket_open(fd);
+    if (recording == NULL) {
+        guac_client_log(client, GUAC_LOG_ERROR, "Creation of recording "
+                "failed: %s", guac_status_string(guac_error));
+        guac_socket_free(socket);
+        return NULL;
+    }
+
+    recording->socket = socket;
     recording->include_output = include_output;
     recording->include_mouse = include_mouse;
     recording->include_touch = include_touch;
     recording->include_keys = include_keys;
+    recording->include_clipboard = include_clipboard;
+
+    if (include_clipboard)
+        recording->clipboard_stream = guac_client_alloc_stream(client);
+    else
+        recording->clipboard_stream = NULL;
 
     /* Replace client socket with wrapped recording socket only if including
      * output within the recording */
-    if (include_output)
-        client->socket = guac_socket_tee(client->socket, recording->socket);
+    if (include_output) {
+
+        guac_socket* client_socket = guac_socket_tee(client->socket, recording->socket);
+        if (client_socket == NULL) {
+            guac_client_log(client, GUAC_LOG_ERROR, "Creation of recording "
+                    "failed: %s", guac_status_string(guac_error));
+            guac_socket_free(recording->socket);
+            guac_mem_free(recording);
+            return NULL;
+        }
+
+        client->socket = client_socket;
+
+    }
 
     /* Recording creation succeeded */
     guac_client_log(client, GUAC_LOG_INFO, "Recording of session will be "
@@ -133,3 +168,52 @@ void guac_recording_report_key(guac_recording* recording,
 
 }
 
+void guac_recording_report_clipboard_begin(guac_recording* recording, guac_stream* stream, char* mimetype) {
+    /* Report clipboard only if recording should contain it */
+    if (recording->include_clipboard)
+        guac_protocol_send_clipboard(recording->socket, stream, mimetype);
+}
+
+void guac_recording_report_clipboard_blob(guac_recording* recording, guac_stream* stream, void* data, int length) {
+    /* Report clipboard only if recording should contain it */
+    if (recording->include_clipboard)
+        guac_protocol_send_blob(recording->socket, stream, data, length);
+}
+
+void guac_recording_report_clipboard_end(guac_recording* recording, guac_stream* stream) {
+    /* Report clipboard only if recording should contain it */
+    if (recording->include_clipboard)
+        guac_protocol_send_end(recording->socket, stream);
+}
+
+void guac_recording_report_clipboard(guac_recording* recording,
+        const char* mimetype, const char* data, int length) {
+
+    /* Report clipboard only if recording should contain clipboard changes */
+    if (!recording->include_clipboard || !recording->clipboard_stream)
+        return;
+
+    guac_socket* socket = recording->socket;
+    guac_stream* stream = recording->clipboard_stream;
+
+    const char* current = data;
+    int remaining = length;
+
+    guac_protocol_send_clipboard(socket, stream, mimetype);
+
+    while (remaining > 0) {
+
+        int block_size = GUAC_RECORDING_CLIPBOARD_BLOCK_SIZE;
+        if (remaining < block_size)
+            block_size = remaining;
+
+        guac_protocol_send_blob(socket, stream, current, block_size);
+
+        remaining -= block_size;
+        current += block_size;
+
+    }
+
+    guac_protocol_send_end(socket, stream);
+
+}

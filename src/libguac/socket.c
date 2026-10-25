@@ -17,14 +17,14 @@
  * under the License.
  */
 
-#include "config.h"
-
 #include "guacamole/mem.h"
 #include "guacamole/error.h"
 #include "guacamole/protocol.h"
 #include "guacamole/socket.h"
+#include "guacamole/thread.h"
 #include "guacamole/timestamp.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -47,11 +47,6 @@ static void* __guac_socket_keep_alive_thread(void* data) {
 
     int old_cancelstate;
 
-    /* Calculate sleep interval */
-    struct timespec interval;
-    interval.tv_sec  =  GUAC_SOCKET_KEEP_ALIVE_INTERVAL / 1000;
-    interval.tv_nsec = (GUAC_SOCKET_KEEP_ALIVE_INTERVAL % 1000) * 1000000L;
-
     /* Socket keep-alive loop */
     guac_socket* socket = (guac_socket*) data;
     while (socket->state == GUAC_SOCKET_OPEN) {
@@ -68,10 +63,17 @@ static void* __guac_socket_keep_alive_thread(void* data) {
 
         }
 
+        /* Calculate sleep interval every loop as nanosleep updates it
+           with the remaining time interval */
+        struct timespec interval;
+        interval.tv_sec  =  GUAC_SOCKET_KEEP_ALIVE_INTERVAL / 1000;
+        interval.tv_nsec = (GUAC_SOCKET_KEEP_ALIVE_INTERVAL % 1000) * 1000000L;
+
         /* Sleep until next keep-alive check, but allow thread cancellation
          * during that sleep */
+        int sleep_result;
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &old_cancelstate);
-        nanosleep(&interval, NULL);
+        GUAC_RETRY_EINTR(sleep_result, nanosleep(&interval, &interval));
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancelstate);
 
     }
@@ -156,17 +158,19 @@ guac_socket* guac_socket_alloc(void) {
     socket->state = GUAC_SOCKET_OPEN;
     socket->last_write_timestamp = guac_timestamp_current();
 
-    /* No keep alive ping by default */
-    socket->__keep_alive_enabled = 0;
+    /* NOTE: The keep alive ping is off by default - see
+     * guac_socket_require_keep_alive() */
+    guac_thread_init(&socket->__keep_alive_thread);
 
     /* No handlers yet */
-    socket->read_handler   = NULL;
-    socket->write_handler  = NULL;
-    socket->select_handler = NULL;
-    socket->free_handler   = NULL;
-    socket->flush_handler  = NULL;
-    socket->lock_handler   = NULL;
-    socket->unlock_handler = NULL;
+    socket->read_handler     = NULL;
+    socket->write_handler    = NULL;
+    socket->select_handler   = NULL;
+    socket->free_handler     = NULL;
+    socket->shutdown_handler = NULL;
+    socket->flush_handler    = NULL;
+    socket->lock_handler     = NULL;
+    socket->unlock_handler   = NULL;
 
     return socket;
 
@@ -175,9 +179,8 @@ guac_socket* guac_socket_alloc(void) {
 void guac_socket_require_keep_alive(guac_socket* socket) {
 
     /* Start keep-alive thread */
-    socket->__keep_alive_enabled = 1;
-    pthread_create(&(socket->__keep_alive_thread), NULL,
-                __guac_socket_keep_alive_thread, (void*) socket);
+    guac_thread_create(&socket->__keep_alive_thread,
+            __guac_socket_keep_alive_thread, (void*) socket, "sock-keep-alive");
 
 }
 
@@ -197,22 +200,28 @@ void guac_socket_instruction_end(guac_socket* socket) {
 
 }
 
+void guac_socket_shutdown(guac_socket* socket) {
+
+    /* Call shutdown handler if defined */
+    if (socket->shutdown_handler)
+        socket->shutdown_handler(socket);
+
+}
+
 void guac_socket_free(guac_socket* socket) {
+
+    /* Mark as closed */
+    socket->state = GUAC_SOCKET_CLOSED;
+
+    /* Stop keep-alive thread, if enabled */
+    guac_thread_cancel(&socket->__keep_alive_thread);
+    guac_thread_join(&socket->__keep_alive_thread, NULL);
 
     guac_socket_flush(socket);
 
     /* Call free handler if defined */
     if (socket->free_handler)
         socket->free_handler(socket);
-
-    /* Mark as closed */
-    socket->state = GUAC_SOCKET_CLOSED;
-
-    /* Stop keep-alive thread, if enabled */
-    if (socket->__keep_alive_enabled) {
-        pthread_cancel(socket->__keep_alive_thread);
-        pthread_join(socket->__keep_alive_thread, NULL);
-    }
 
     guac_mem_free(socket);
 }

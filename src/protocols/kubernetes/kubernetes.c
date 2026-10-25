@@ -17,8 +17,6 @@
  * under the License.
  */
 
-#include "config.h"
-
 #include "argv.h"
 #include "client.h"
 #include "io.h"
@@ -31,11 +29,14 @@
 #include <guacamole/mem.h>
 #include <guacamole/protocol.h>
 #include <guacamole/recording.h>
+#include <guacamole/string.h>
+#include <guacamole/thread.h>
 #include <libwebsockets.h>
 
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /**
  * Callback invoked by libwebsockets for events related to a WebSocket being
@@ -203,7 +204,7 @@ void* guac_kubernetes_client_thread(void* data) {
 
     guac_kubernetes_settings* settings = kubernetes_client->settings;
 
-    pthread_t input_thread;
+    guac_thread input_thread;
     char endpoint_path[GUAC_KUBERNETES_MAX_ENDPOINT_LENGTH];
 
     /* Verify that the pod name was specified (it's always required) */
@@ -213,12 +214,46 @@ void* guac_kubernetes_client_thread(void* data) {
         goto fail;
     }
 
+    const char* kubernetes_namespace = settings->kubernetes_namespace;
+    char kubernetes_name[GUAC_KUBERNETES_MAX_NAME_LENGTH];
+
+    /* Namespace should already be populated by argument parsing, but
+     * provide fallback. */
+    if (kubernetes_namespace == NULL || *kubernetes_namespace == '\0')
+        kubernetes_namespace = GUAC_KUBERNETES_DEFAULT_NAMESPACE;
+
+    /* Identify the attached Kubernetes target (for example, "default/mypod" or
+     * "default/mypod/container"). Include the container when specified to
+     * distinguish multi-container pods. */
+    if (settings->kubernetes_container != NULL
+            && *settings->kubernetes_container != '\0')
+        snprintf(kubernetes_name, sizeof(kubernetes_name), "%s/%s/%s",
+                kubernetes_namespace, settings->kubernetes_pod,
+                settings->kubernetes_container);
+    else
+        snprintf(kubernetes_name, sizeof(kubernetes_name), "%s/%s",
+                kubernetes_namespace, settings->kubernetes_pod);
+
+    /* A Kubernetes connection accesses a pod served by the Kubernetes server,
+     * and is identified by both */
+    char kubernetes_port[GUAC_USHORT_STRING_BUFSIZE];
+    if (guac_itoa_safe(kubernetes_port, sizeof(kubernetes_port),
+                settings->port) < 1)
+        kubernetes_port[0] = '\0';
+
+    guac_client_set_info(client, &(guac_client_info) {
+        .hostname = settings->hostname,
+        .port = kubernetes_port,
+        .resource_name = kubernetes_name
+    });
+
     /* Generate endpoint for attachment URL */
     if (guac_kubernetes_endpoint_uri(endpoint_path, sizeof(endpoint_path),
                 settings->kubernetes_namespace,
                 settings->kubernetes_pod,
                 settings->kubernetes_container,
-                settings->exec_command)) {
+                settings->exec_command,
+                settings->terminal_type)) {
         guac_client_abort(client, GUAC_PROTOCOL_STATUS_SERVER_ERROR,
                 "Unable to generate path for Kubernetes API endpoint: "
                 "Resulting path too long");
@@ -238,7 +273,8 @@ void* guac_kubernetes_client_thread(void* data) {
                 !settings->recording_exclude_mouse,
                 0, /* Touch events not supported */
                 settings->recording_include_keys,
-                settings->recording_write_existing);
+                settings->recording_write_existing,
+                settings->recording_include_clipboard);
     }
 
     /* Create terminal options with required parameters */
@@ -254,6 +290,7 @@ void* guac_kubernetes_client_thread(void* data) {
     options->color_scheme = settings->color_scheme;
     options->backspace = settings->backspace;
     options->func_keys_and_keypad = settings->func_keys_and_keypad;
+    options->linux_console_keys = strcmp(settings->terminal_type, "linux") == 0;
 
     /* Create terminal */
     kubernetes_client->term = guac_terminal_create(client, options);
@@ -341,7 +378,7 @@ void* guac_kubernetes_client_thread(void* data) {
     pthread_mutex_init(&(kubernetes_client->outbound_message_lock), NULL);
 
     /* Start input thread */
-    if (pthread_create(&(input_thread), NULL, guac_kubernetes_input_thread, (void*) client)) {
+    if (guac_thread_create(&input_thread, guac_kubernetes_input_thread, (void*) client, "k8s-input")) {
         guac_client_abort(client, GUAC_PROTOCOL_STATUS_SERVER_ERROR, "Unable to start input thread");
         goto fail;
     }
@@ -364,7 +401,7 @@ void* guac_kubernetes_client_thread(void* data) {
     /* Kill client and Wait for input thread to die */
     guac_terminal_stop(kubernetes_client->term);
     guac_client_stop(client);
-    pthread_join(input_thread, NULL);
+    guac_thread_join(&input_thread, NULL);
 
 fail:
 

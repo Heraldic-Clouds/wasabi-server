@@ -31,6 +31,14 @@
 #define GUAC_KUBERNETES_DEFAULT_PORT 8080
 
 /**
+ * The maximum number of bytes to permit for the name identifying the Kubernetes pod and
+ * container served by a connection, including the null terminator. This length
+ * applies to representing the connection in a human-readable way and has no
+ * impact on where connections may be routed.
+ */
+#define GUAC_KUBERNETES_MAX_NAME_LENGTH 256
+
+/**
  * The name of the Kubernetes namespace that should be used by default if no
  * specific Kubernetes namespace is provided.
  */
@@ -246,6 +254,16 @@ typedef struct guac_kubernetes_settings {
     bool recording_include_keys;
 
     /**
+     * Whether clipboard data should be included in the session recording.
+     * Clipboard data is NOT included by default within the recording,
+     * as doing so has privacy and security implications. Including clipboard data
+     * may be necessary in certain auditing contexts, but should only be done
+     * with caution. Clipboard data can easily contain sensitive information, such
+     * as passwords, credit card numbers, etc.
+     */
+    bool recording_include_clipboard;
+
+    /**
      * Whether existing files should be appended to when creating a new recording.
      * Disabled by default.
      */
@@ -263,6 +281,12 @@ typedef struct guac_kubernetes_settings {
      * the function and keypad keys.
      */
     char* func_keys_and_keypad;
+
+    /**
+     * The terminal emulator type that is connected to this server (e.g.
+     * "xterm" or "xterm-256color"). "linux" is used if unspecified.
+     */
+    char* terminal_type;
 
 } guac_kubernetes_settings;
 
