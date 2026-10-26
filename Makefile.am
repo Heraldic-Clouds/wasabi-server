@@ -37,6 +37,7 @@ DIST_SUBDIRS =               \
     src/pulse                \
     src/protocols/game       \
     src/protocols/kubernetes \
+    src/protocols/mea        \
     src/protocols/rdp        \
     src/protocols/ssh        \
     src/protocols/telnet     \
@@ -64,6 +65,10 @@ endif
 
 if ENABLE_KUBERNETES
 SUBDIRS += src/protocols/kubernetes
+endif
+
+if ENABLE_MEA
+SUBDIRS += src/protocols/mea
 endif
 
 if ENABLE_RDP
