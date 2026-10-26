@@ -1554,6 +1554,21 @@ AM_CONDITIONAL([ENABLE_GAME], [test "x${enable_game}"     = "xyes" \
                                  -a "x${have_libswscale}" = "xyes"])
 
 #
+# MEA Stream agent adapter (experimental)
+#
+
+AC_ARG_ENABLE([mea],
+              [AS_HELP_STRING([--disable-mea],
+                              [do not build the experimental MEA Stream agent adapter])],
+              [],
+              [enable_mea=yes])
+
+AM_CONDITIONAL([ENABLE_MEA], [test "x${enable_mea}"       = "xyes" \
+                                -a "x${have_libavcodec}" = "xyes" \
+                                -a "x${have_libavutil}"  = "xyes" \
+                                -a "x${have_libswscale}" = "xyes"])
+
+#
 # Kubernetes
 #
 
@@ -1634,6 +1649,7 @@ AC_CONFIG_FILES([Makefile
                  src/protocols/game/Makefile
                  src/protocols/kubernetes/Makefile
                  src/protocols/kubernetes/tests/Makefile
+                 src/protocols/mea/Makefile
                  src/protocols/rdp/Makefile
                  src/protocols/rdp/tests/Makefile
                  src/protocols/ssh/Makefile
@@ -1647,6 +1663,7 @@ AC_OUTPUT
 
 AM_COND_IF([ENABLE_GAME],       [build_game=yes],       [build_game=no])
 AM_COND_IF([ENABLE_KUBERNETES], [build_kubernetes=yes], [build_kubernetes=no])
+AM_COND_IF([ENABLE_MEA],        [build_mea=yes],        [build_mea=no])
 AM_COND_IF([ENABLE_RDP],        [build_rdp=yes],        [build_rdp=no])
 AM_COND_IF([ENABLE_SSH],        [build_ssh=yes],        [build_ssh=no])
 AM_COND_IF([ENABLE_TELNET],     [build_telnet=yes],     [build_telnet=no])
@@ -1711,6 +1728,7 @@ $PACKAGE_NAME version $PACKAGE_VERSION
 
       Game .......... ${build_game}
       Kubernetes .... ${build_kubernetes}
+      MEA (exp.) .... ${build_mea}
       RDP ........... ${build_rdp}
       SSH ........... ${build_ssh}
       Telnet ........ ${build_telnet}

@@ -171,6 +171,7 @@ RUN apk add --no-cache                \
         cjson-dev                     \
         cmake                         \
         cunit-dev                     \
+        ffmpeg-dev                    \
         git                           \
         grep                          \
         krb5-dev                      \
